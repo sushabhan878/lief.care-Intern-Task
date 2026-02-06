@@ -244,8 +244,14 @@ export default function Home() {
     setLoadingNotes(true);
     try {
       const response = await fetch("/api/notes");
+      if (!response.ok) {
+        throw new Error(`Failed to load notes: ${response.statusText}`);
+      }
       const data = await response.json();
       setNotes(data.notes ?? []);
+    } catch (error) {
+      console.error("Error loading notes:", error);
+      setNotes([]);
     } finally {
       setLoadingNotes(false);
     }
@@ -260,35 +266,73 @@ export default function Home() {
   }, [isAuthenticated]);
 
   const runOcrOnImage = async (image: string | Blob) => {
+    try {
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("eng", 1, {
+        logger: (message) => {
+          if (message.status === "recognizing text" && message.progress) {
+            setOcrProgress(Math.round(message.progress * 100));
+          }
+        },
+      });
+
+      const result = await worker.recognize(image);
+      await worker.terminate();
+      return result.data.text || "";
+    } catch (error) {
+      console.error("OCR Error:", error);
+      throw error;
+    }
+  };
+
+  const renderPdfToImageWithOCR = async (file: File) => {
+    const pdfjs = await import("pdfjs-dist");
+
+    // --- FIX APPLIED HERE ---
+    // 1. Used 'https' explicitly to avoid mixed content or redirect issues.
+    // 2. Pointed to 'pdf.worker.min.mjs' (ES Module version) because the error
+    //    indicated the browser was trying to perform a dynamic module import.
+    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+
+    const buffer = await file.arrayBuffer();
+    const pdf = await pdfjs.getDocument({ data: buffer }).promise;
+
     const { createWorker } = await import("tesseract.js");
+
     const worker = await createWorker("eng", 1, {
-      logger: (message) => {
-        if (message.status === "recognizing text" && message.progress) {
-          setOcrProgress(Math.round(message.progress * 100));
+      logger: (m) => {
+        if (m.status === "recognizing text" && m.progress) {
+          setOcrProgress(Math.round(m.progress * 100));
         }
       },
     });
 
-    const result = await worker.recognize(image);
+    const results = [];
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: 2 });
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d")!;
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      const blob = await new Promise<Blob>((resolve) =>
+        canvas.toBlob((b) => resolve(b!), "image/png"),
+      );
+
+      const {
+        data: { text },
+      } = await worker.recognize(canvas);
+
+      results.push({ page: pageNum, image: blob, text });
+    }
+
     await worker.terminate();
-    return result.data.text;
-  };
-
-  const renderPdfToImage = async (file: File) => {
-    const pdfjs = await import("pdfjs-dist");
-    pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.mjs`;
-
-    const buffer = await file.arrayBuffer();
-    const pdf = await pdfjs.getDocument({ data: buffer }).promise;
-    const page = await pdf.getPage(1);
-    const viewport = page.getViewport({ scale: 2 });
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas context unavailable");
-    canvas.width = viewport.width;
-    canvas.height = viewport.height;
-    await page.render({ canvasContext: context, viewport, canvas }).promise;
-    return canvas.toDataURL("image/png");
+    return results;
   };
 
   const handleScanFile = async (file: File) => {
@@ -302,15 +346,28 @@ export default function Home() {
       const preview = await fileToBase64(file);
       setScanPreview(preview);
 
-      let ocrSource: string | Blob = file;
       if (file.type === "application/pdf") {
-        ocrSource = await renderPdfToImage(file);
-      }
+        console.log("Processing PDF with OCR...");
+        const results = await renderPdfToImageWithOCR(file);
 
-      const text = await runOcrOnImage(ocrSource);
-      setOcrText(text.trim());
-    } catch {
-      setOcrText("Unable to extract text. Please try a clearer scan.");
+        // Combine all page texts
+        const combinedText = results
+          .map((r) => `--- Page ${r.page} ---\n${r.text}`)
+          .join("\n\n");
+
+        setOcrText(combinedText.trim());
+      } else {
+        console.log("Running OCR on image...");
+        const text = await runOcrOnImage(file);
+        setOcrText(text.trim());
+      }
+    } catch (error) {
+      console.error("Scan error:", error);
+      setOcrText(
+        error instanceof Error
+          ? `Error: ${error.message}`
+          : "Unable to extract text. Please try a clearer scan.",
+      );
     } finally {
       setOcrBusy(false);
     }
@@ -417,16 +474,20 @@ export default function Home() {
         }),
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
+        const data = await response.json();
         setAuthError(data.error || "Registration failed.");
         return;
       }
 
+      const data = await response.json();
       setAuthMode("signin");
       setAuthError("Account created! Please sign in.");
       setAuthForm({ ...authForm, name: "", position: "" });
+    } catch (error) {
+      setAuthError(
+        error instanceof Error ? error.message : "An error occurred",
+      );
     } finally {
       setAuthLoading(false);
     }
@@ -760,7 +821,7 @@ export default function Home() {
                       value={ocrText}
                       onChange={(event) => setOcrText(event.target.value)}
                       placeholder="OCR text will appear here"
-                      className="mt-2 h-32 w-full resize-none rounded-xl border border-emerald-300 bg-white p-3 text-sm"
+                      className="mt-2 h-80 w-full resize-none rounded-xl border border-emerald-300 bg-white p-3 text-sm"
                       disabled={!isAuthenticated}
                     />
                   </div>
@@ -837,10 +898,7 @@ export default function Home() {
                 </div>
               )}
 
-              <div
-                className="mt-6 space-y-4 overflow-y-auto"
-                style={{ maxHeight: "calc(100vh + 150px)" }}
-              >
+              <div className="mt-6 space-y-4 overflow-y-auto h-[1330]">
                 {notes.map((note) => (
                   <article
                     key={note._id}
