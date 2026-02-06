@@ -50,7 +50,16 @@ body {
   background: #ffffff;
 }
 
-.editor-wrapper:focus-within {
+.editor-wrapper-edit {
+  height: 192px;
+  overflow-y: auto;
+  border-radius: 16px;
+  border: 1px solid var(--green-300);
+  background: #ffffff;
+}
+
+.editor-wrapper:focus-within,
+.editor-wrapper-edit:focus-within {
   border-color: var(--green-600);
 }
 

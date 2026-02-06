@@ -1072,7 +1072,7 @@ export default function Home() {
                       </label>
                       <div className="mt-2 space-y-2">
                         {editToolbar}
-                        <div className="editor-wrapper">
+                        <div className="editor-wrapper-edit">
                           <EditorContent editor={editEditor} />
                         </div>
                       </div>
